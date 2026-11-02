@@ -71,6 +71,7 @@ import org.koitharu.kotatsu.parsers.model.MangaPage
 import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.util.requireBody
 import org.koitharu.kotatsu.parsers.util.runCatchingCancellable
+import org.koitharu.kotatsu.reader.translate.MangaTranslator
 import org.koitharu.kotatsu.reader.ui.pager.ReaderPage
 import java.io.File
 import java.util.LinkedList
@@ -91,6 +92,7 @@ class PageLoader @Inject constructor(
 	private val mangaRepositoryFactory: MangaRepository.Factory,
 	private val imageProxyInterceptor: ImageProxyInterceptor,
 	private val downloadSlowdownDispatcher: DownloadSlowdownDispatcher,
+	private val mangaTranslator: MangaTranslator,
 ) {
 
 	val loaderScope = lifecycle.lifecycleScope + InternalErrorHandler() + Dispatchers.Default
@@ -209,6 +211,19 @@ class PageLoader @Inject constructor(
 			}
 			uri
 		}
+	}
+
+	val isTranslateEnabled: Boolean
+		get() = settings.isMangaTranslateEnabled
+
+	/** Replaces page text with a translation if the feature is enabled. Falls back to the original on any error. */
+	suspend fun translateIfEnabled(uri: Uri): Uri {
+		if (!settings.isMangaTranslateEnabled) return uri
+		return runCatchingCancellable {
+			mangaTranslator.translate(uri, settings.translateSourceLang, settings.translateTargetLang)
+		}.onFailure { error ->
+			error.printStackTraceDebug()
+		}.getOrDefault(uri)
 	}
 
 	suspend fun getTrimmedBounds(uri: Uri): Rect? = runCatchingCancellable {
