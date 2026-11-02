@@ -131,6 +131,14 @@ dependencies {
 	implementation libs.kotlin.stdlib
 	implementation libs.kotlinx.coroutines.android
 	implementation libs.kotlinx.coroutines.guava
+	implementation libs.kotlinx.coroutines.play.services
+
+	// Manga translation (on-device OCR + translation)
+	implementation libs.mlkit.ocr.latin
+	implementation libs.mlkit.ocr.japanese
+	implementation libs.mlkit.ocr.chinese
+	implementation libs.mlkit.ocr.korean
+	implementation libs.mlkit.translate
 
 	implementation libs.androidx.appcompat
 	implementation libs.androidx.core
