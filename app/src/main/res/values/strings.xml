@@ -907,4 +907,8 @@
     <string name="download_default_directory">Default directory for downloading manga</string>
     <string name="private_app_directory_warning">This directory with all data will be deleted if you uninstall the application</string>
     <string name="available_pattern">%1$s available</string>
+    <string name="manga_translate">Translate manga pages</string>
+    <string name="manga_translate_summary">Detect text on pages and replace it with a translation (on-device, first use downloads language models)</string>
+    <string name="manga_translate_source">Original language</string>
+    <string name="manga_translate_target">Translate to</string>
 </resources>
