@@ -30,6 +30,8 @@ kizzyRpc = "ad8f2e32eb"
 ksp = "2.2.10-2.0.2"
 leakcanary = "3.0-alpha-8"
 lifecycle = "2.9.4"
+mlkitRecognition = "16.0.1"
+mlkitTranslate = "17.0.3"
 markwon = "4.6.2"
 material = "1.14.0-alpha05"
 moshi = "1.15.2"
@@ -100,6 +102,7 @@ junit = { module = "junit:junit", version.ref = "junit" }
 kizzyrpc = { module = "com.github.dead8309:KizzyRPC", version.ref = "kizzyRpc" }
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib", version.ref = "kotlin" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-play-services = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-play-services", version.ref = "coroutines" }
 kotlinx-coroutines-guava = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-guava", version.ref = "coroutines" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json-jvm", version.ref = "serialization" }
@@ -109,6 +112,11 @@ lifecycle-service = { module = "androidx.lifecycle:lifecycle-service", version.r
 lifecycle-viewmodel = { module = "androidx.lifecycle:lifecycle-viewmodel-ktx", version.ref = "lifecycle" }
 markwon = { module = "io.noties.markwon:core", version.ref = "markwon" }
 material = { module = "com.google.android.material:material", version.ref = "material" }
+mlkit-ocr-latin = { module = "com.google.mlkit:text-recognition", version.ref = "mlkitRecognition" }
+mlkit-ocr-japanese = { module = "com.google.mlkit:text-recognition-japanese", version.ref = "mlkitRecognition" }
+mlkit-ocr-chinese = { module = "com.google.mlkit:text-recognition-chinese", version.ref = "mlkitRecognition" }
+mlkit-ocr-korean = { module = "com.google.mlkit:text-recognition-korean", version.ref = "mlkitRecognition" }
+mlkit-translate = { module = "com.google.mlkit:translate", version.ref = "mlkitTranslate" }
 moshi-kotlin = { module = "com.squareup.moshi:moshi-kotlin", version.ref = "moshi" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
 okhttp-dnsoverhttps = { module = "com.squareup.okhttp3:okhttp-dnsoverhttps", version.ref = "okhttp" }
