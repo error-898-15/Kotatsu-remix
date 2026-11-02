@@ -169,6 +169,15 @@ class AppSettings @Inject constructor(@ApplicationContext context: Context) {
 	val isReaderOptimizationEnabled: Boolean
 		get() = prefs.getBoolean(KEY_READER_OPTIMIZE, false)
 
+	val isMangaTranslateEnabled: Boolean
+		get() = prefs.getBoolean(KEY_TRANSLATE_ENABLED, false)
+
+	val translateSourceLang: String
+		get() = prefs.getString(KEY_TRANSLATE_SOURCE, "ja") ?: "ja"
+
+	val translateTargetLang: String
+		get() = prefs.getString(KEY_TRANSLATE_TARGET, "en") ?: "en"
+
 	val readerControls: Set<ReaderControl>
 		get() = prefs.getStringSet(KEY_READER_CONTROLS, null)?.mapNotNullTo(EnumSet.noneOf(ReaderControl::class.java)) {
 			ReaderControl.entries.find(it)
@@ -761,6 +770,9 @@ class AppSettings @Inject constructor(@ApplicationContext context: Context) {
 		const val KEY_SHORTCUTS = "dynamic_shortcuts"
 		const val KEY_READER_TAP_ACTIONS = "reader_tap_actions"
 		const val KEY_READER_OPTIMIZE = "reader_optimize"
+		const val KEY_TRANSLATE_ENABLED = "manga_translate"
+		const val KEY_TRANSLATE_SOURCE = "manga_translate_source"
+		const val KEY_TRANSLATE_TARGET = "manga_translate_target"
 		const val KEY_LOCAL_LIST_ORDER = "local_order"
 		const val KEY_HISTORY_ORDER = "history_order"
 		const val KEY_FAVORITES_ORDER = "fav_order"
