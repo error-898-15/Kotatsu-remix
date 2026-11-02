@@ -144,4 +144,42 @@
 		<item>@string/ask_every_time</item>
 		<item>@string/disable</item>
 	</string-array>
+	<string-array name="translate_source_names" translatable="false">
+		<item>Japanese</item>
+		<item>Chinese</item>
+		<item>Korean</item>
+		<item>English</item>
+	</string-array>
+	<string-array name="translate_source_values" translatable="false">
+		<item>ja</item>
+		<item>zh</item>
+		<item>ko</item>
+		<item>en</item>
+	</string-array>
+	<string-array name="translate_target_names" translatable="false">
+		<item>English</item>
+		<item>Bengali</item>
+		<item>Hindi</item>
+		<item>Indonesian</item>
+		<item>Spanish</item>
+		<item>Portuguese</item>
+		<item>Russian</item>
+		<item>Arabic</item>
+		<item>French</item>
+		<item>German</item>
+		<item>Turkish</item>
+	</string-array>
+	<string-array name="translate_target_values" translatable="false">
+		<item>en</item>
+		<item>bn</item>
+		<item>hi</item>
+		<item>id</item>
+		<item>es</item>
+		<item>pt</item>
+		<item>ru</item>
+		<item>ar</item>
+		<item>fr</item>
+		<item>de</item>
+		<item>tr</item>
+	</string-array>
 </resources>
