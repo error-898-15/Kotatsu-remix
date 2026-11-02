@@ -142,9 +142,13 @@ class PageViewModel(
 		try {
 			val task = loader.loadPageAsync(data, force)
 			val progressObserver = observeProgress(this, task.progressAsFlow())
-			val uri = task.await()
+			var uri = task.await()
 			progressObserver.cancelAndJoin()
 			previewJob.cancel()
+			if (loader.isTranslateEnabled) {
+				state.value = PageState.Converting()
+				uri = loader.translateIfEnabled(uri)
+			}
 			cachedBounds = if (settingsProducer.value.isPagesCropEnabled(isWebtoon)) {
 				loader.getTrimmedBounds(uri)
 			} else {
