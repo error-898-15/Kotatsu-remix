@@ -68,7 +68,7 @@ data class TranslateConfig(
 	/** Google Translate is used as the main engine, or as the quality fallback when Gemini fails. */
 	val useGoogle: Boolean get() = engine == "google" || engine == "gemini"
 	val cacheKey: String
-		get() = "v4_${source}_${target}_${if (useGemini) "g" else if (useGoogle) "o" else "m"}"
+		get() = "v5_${source}_${target}_${if (useGemini) "g" else if (useGoogle) "o" else "m"}"
 }
 
 /**
@@ -108,7 +108,7 @@ class MangaTranslator @Inject constructor(
 			if (out.exists() && out.length() > 0) return@withLock Uri.fromFile(out)
 			val bitmap = withContext(Dispatchers.IO) { decode(uri) } ?: return@withLock uri
 			try {
-				val bubbles = group(recognize(bitmap, cfg.source))
+				val bubbles = mergeByInterior(bitmap, group(recognize(bitmap, cfg.source)))
 				if (bubbles.isEmpty()) {
 					none.createNewFile() // no text on this page, do not scan it again
 					return@withLock uri
@@ -228,7 +228,8 @@ class MangaTranslator @Inject constructor(
 			val ordered = if (vertical) {
 				lines.sortedByDescending { it.rect.centerX() }
 			} else {
-				lines.sortedBy { it.rect.centerY() }
+				val row = max(1, thickness.toInt())
+				lines.sortedWith(compareBy({ it.rect.centerY() / row }, { it.rect.centerX() }))
 			}
 			val cjk = ordered.any { l -> l.text.any { scriptOf(it) == "ja" || scriptOf(it) == "zh" } }
 			return ordered.joinToString(if (cjk) "" else " ") { it.text }
@@ -551,7 +552,7 @@ class MangaTranslator @Inject constructor(
 			val area: Rect
 			if (ring.uniform) {
 				val grow = (max(b.rect.width(), b.rect.height()) * 0.6f).toInt() + 8
-				area = growWhileUniform(bitmap, b.rect, ring.color, grow)
+				area = growRegion(bitmap, b.rect, ring.color, grow, 60, 0.94f).rect
 			} else {
 				val px = (b.thickness * 0.5f).toInt()
 				val py = (b.thickness * 0.2f).toInt()
@@ -597,31 +598,79 @@ class MangaTranslator @Inject constructor(
 		}
 	}
 
-	/** Removes only the glyph pixels (plus a small halo) and fills them from the surrounding background. */
+	/**
+	 * Removes the original text. If the text sits inside a closed bubble / box, EVERYTHING in the bubble that is not
+	 * background is removed (also lines OCR missed and faint glow / outline remains). Otherwise only the pixels of the
+	 * recognized lines are removed. The hole is then filled from the surrounding background.
+	 */
 	private fun eraseText(bmp: Bitmap, b: Bubble, ring: Ring) {
-		val pad = max(3, (b.thickness * 0.22f).toInt())
-		val roi = Rect(b.rect).apply { inset(-pad, -pad) }
+		val pad = max(4, (b.thickness * 0.3f).toInt())
+		val region = if (ring.uniform) growRegion(bmp, b.rect, ring.color, looseGrow(b.rect), 60, 0.55f) else null
+		val interior = region != null && region.bounded
+		val roi = if (interior) Rect(region!!.rect) else Rect(b.rect).apply { inset(-pad, -pad) }
 		if (!roi.intersect(0, 0, bmp.width, bmp.height)) return
 		val w = roi.width()
 		val h = roi.height()
-		if (w < 2 || h < 2) return
+		if (w < 3 || h < 3) return
 		val px = IntArray(w * h)
 		bmp.getPixels(px, 0, w, roi.left, roi.top, w, h)
 		val mask = BooleanArray(w * h)
-		for (line in b.lines) {
-			val lr = Rect(line.rect).apply { inset(-pad, -pad) }
-			if (!lr.intersect(roi)) continue
-			val bg = if (ring.uniform) ring.color else ringInfo(bmp, line.rect, pad + 2).color
-			for (y in lr.top until lr.bottom) {
-				val row = (y - roi.top) * w - roi.left
-				for (x in lr.left until lr.right) {
-					if (dist(px[row + x], bg) > 100) mask[row + x] = true
+		if (interior) {
+			for (i in px.indices) if (dist(px[i], ring.color) > 50) mask[i] = true
+			dropBoundaryComponents(mask, w, h) // bubble outline / tail touch the border of the region: keep them
+		} else {
+			for (line in b.lines) {
+				val lr = Rect(line.rect).apply { inset(-pad, -pad) }
+				if (!lr.intersect(roi)) continue
+				val bg = if (ring.uniform) ring.color else ringInfo(bmp, line.rect, pad + 2).color
+				val limit = if (ring.uniform) 60 else 70
+				for (y in lr.top until lr.bottom) {
+					val row = (y - roi.top) * w - roi.left
+					for (x in lr.left until lr.right) {
+						if (dist(px[row + x], bg) > limit) mask[row + x] = true
+					}
 				}
 			}
 		}
-		dilate(mask, w, h, max(1, (b.thickness * 0.12f).toInt()))
+		dilate(mask, w, h, max(2, (b.thickness * 0.16f).toInt()))
 		inpaint(px, mask, w, h, ring.color)
 		bmp.setPixels(px, 0, w, roi.left, roi.top, w, h)
+	}
+
+	private fun looseGrow(r: Rect) = (max(r.width(), r.height()) * 0.6f).toInt() + 10
+
+	/** Clears every connected group of mask pixels that touches the outer frame of the region. */
+	private fun dropBoundaryComponents(mask: BooleanArray, w: Int, h: Int) {
+		val visited = BooleanArray(mask.size)
+		val queue = IntArray(mask.size)
+		var tail = 0
+		for (start in mask.indices) {
+			if (!mask[start] || visited[start]) continue
+			val from = tail
+			queue[tail++] = start
+			visited[start] = true
+			var head = from
+			var touches = false
+			while (head < tail) {
+				val p = queue[head++]
+				val x = p % w
+				val y = p / w
+				if (x == 0 || y == 0 || x == w - 1 || y == h - 1) touches = true
+				for (dy in -1..1) {
+					for (dx in -1..1) {
+						val nx = x + dx
+						val ny = y + dy
+						if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+						val n = ny * w + nx
+						if (mask[n] && !visited[n]) {
+							visited[n] = true
+							queue[tail++] = n
+						}
+					}
+				}
+			}
+			if (touches) for (k in from until tail) mask[queue[k]] = false
+		}
 	}
 
 	private fun dilate(mask: BooleanArray, w: Int, h: Int, r: Int) {
@@ -645,6 +694,9 @@ class MangaTranslator @Inject constructor(
 				}
 			}
 		}
+		// never touch the outermost frame (it may belong to the bubble outline)
+		for (x in 0 until w) { out[x] = false; out[(h - 1) * w + x] = false }
+		for (y in 0 until h) { out[y * w] = false; out[y * w + w - 1] = false }
 		out.copyInto(mask)
 	}
 
@@ -771,8 +823,14 @@ class MangaTranslator @Inject constructor(
 	private fun dist(a: Int, b: Int) =
 		abs(Color.red(a) - Color.red(b)) + abs(Color.green(a) - Color.green(b)) + abs(Color.blue(a) - Color.blue(b))
 
-	/** Grows [r] outwards while the new edge strip is still the bubble colour, i.e. finds the bubble interior. */
-	private fun growWhileUniform(bmp: Bitmap, r: Rect, bg: Int, maxGrow: Int): Rect {
+	private class Region(val rect: Rect, val bounded: Boolean)
+
+	/**
+	 * Grows [r] outwards while the new edge band still looks like the bubble background ([frac] of its pixels within
+	 * [tol] of [bg]). [Region.bounded] is true when every side stopped at a real edge (bubble outline, panel border,
+	 * image edge) and not because [maxGrow] was reached, i.e. the text sits inside a closed bubble / box.
+	 */
+	private fun growRegion(bmp: Bitmap, r: Rect, bg: Int, maxGrow: Int, tol: Int, frac: Float): Region {
 		val out = Rect(r)
 		val step = 3
 		var gl = 0
@@ -783,39 +841,80 @@ class MangaTranslator @Inject constructor(
 		var rt = true
 		var t = true
 		var b = true
+		var limited = false
 		while (l || rt || t || b) {
 			if (l) {
 				val x = out.left - step
-				if (x < 0 || gl + step > maxGrow || !isFlat(bmp, x, out.top, x + 1, out.bottom, bg)) l = false
+				if (x < 0) l = false
+				else if (gl + step > maxGrow) { l = false; limited = true }
+				else if (!isFlat(bmp, x, out.top, out.left, out.bottom, bg, tol, frac)) l = false
 				else { out.left = x; gl += step }
 			}
 			if (rt) {
 				val x = out.right + step
-				if (x >= bmp.width || gr + step > maxGrow || !isFlat(bmp, x, out.top, x + 1, out.bottom, bg)) rt = false
+				if (x >= bmp.width) rt = false
+				else if (gr + step > maxGrow) { rt = false; limited = true }
+				else if (!isFlat(bmp, out.right, out.top, x, out.bottom, bg, tol, frac)) rt = false
 				else { out.right = x; gr += step }
 			}
 			if (t) {
 				val y = out.top - step
-				if (y < 0 || gt + step > maxGrow || !isFlat(bmp, out.left, y, out.right, y + 1, bg)) t = false
+				if (y < 0) t = false
+				else if (gt + step > maxGrow) { t = false; limited = true }
+				else if (!isFlat(bmp, out.left, y, out.right, out.top, bg, tol, frac)) t = false
 				else { out.top = y; gt += step }
 			}
 			if (b) {
 				val y = out.bottom + step
-				if (y >= bmp.height || gb + step > maxGrow || !isFlat(bmp, out.left, y, out.right, y + 1, bg)) b = false
+				if (y >= bmp.height) b = false
+				else if (gb + step > maxGrow) { b = false; limited = true }
+				else if (!isFlat(bmp, out.left, out.bottom, out.right, y, bg, tol, frac)) b = false
 				else { out.bottom = y; gb += step }
 			}
 		}
-		return out
+		return Region(out, !limited)
 	}
 
-	private fun isFlat(bmp: Bitmap, x0: Int, y0: Int, x1: Int, y1: Int, bg: Int): Boolean {
+	/** Checks the whole band (not a single pixel line), so a thin bubble outline cannot slip through. */
+	private fun isFlat(bmp: Bitmap, x0: Int, y0: Int, x1: Int, y1: Int, bg: Int, tol: Int, frac: Float): Boolean {
 		val left = x0.coerceIn(0, bmp.width - 1)
 		val top = y0.coerceIn(0, bmp.height - 1)
 		val w = (x1.coerceIn(left + 1, bmp.width) - left)
 		val h = (y1.coerceIn(top + 1, bmp.height) - top)
 		val px = IntArray(w * h)
 		bmp.getPixels(px, 0, w, left, top, w, h)
-		return px.count { dist(it, bg) <= 60 } >= px.size * 0.94f
+		return px.count { dist(it, bg) <= tol } >= px.size * frac
+	}
+
+	/**
+	 * OCR often splits one bubble into several pieces (different line heights, stylised fonts). If a piece lies inside
+	 * the closed interior of another one, it belongs to the same bubble: merge them so they are translated together.
+	 */
+	private fun mergeByInterior(bmp: Bitmap, bubbles: List<Bubble>): List<Bubble> {
+		val n = bubbles.size
+		if (n < 2) return bubbles
+		val parent = IntArray(n) { it }
+		fun find(i: Int): Int {
+			var x = i
+			while (parent[x] != x) {
+				parent[x] = parent[parent[x]]
+				x = parent[x]
+			}
+			return x
+		}
+		for (i in 0 until n) {
+			val b = bubbles[i]
+			val ring = ringInfo(bmp, b.rect, max(4, (b.thickness * 0.35f).toInt()))
+			if (!ring.uniform) continue
+			val region = growRegion(bmp, b.rect, ring.color, looseGrow(b.rect), 60, 0.55f)
+			if (!region.bounded) continue
+			for (j in 0 until n) {
+				if (j != i && region.rect.contains(bubbles[j].rect)) parent[find(j)] = find(i)
+			}
+		}
+		return bubbles.indices.groupBy { find(it) }.values.map { ids ->
+			if (ids.size == 1) bubbles[ids[0]] else Bubble(ids.flatMap { bubbles[it].lines })
+		}
 	}
 
 	// ---------------------------------------------------------------- helpers
