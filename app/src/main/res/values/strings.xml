@@ -911,4 +911,8 @@
     <string name="manga_translate_summary">Detect text on pages and replace it with a translation (on-device, first use downloads language models)</string>
     <string name="manga_translate_source">Original language</string>
     <string name="manga_translate_target">Translate to</string>
+    <string name="manga_translate_engine">Translation engine</string>
+    <string name="manga_translate_gemini_key">Gemini API key</string>
+    <string name="manga_translate_gemini_key_summary">Free key from aistudio.google.com. Needed only for the Gemini engine</string>
+    <string name="manga_translate_gemini_model">Gemini model</string>
 </resources>
