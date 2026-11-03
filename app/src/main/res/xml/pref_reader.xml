@@ -114,7 +114,7 @@
 		app:allowDividerAbove="true" />
 
 	<ListPreference
-		android:defaultValue="ja"
+		android:defaultValue="auto"
 		android:dependency="manga_translate"
 		android:entries="@array/translate_source_names"
 		android:entryValues="@array/translate_source_values"
@@ -129,6 +129,28 @@
 		android:entryValues="@array/translate_target_values"
 		android:key="manga_translate_target"
 		android:title="@string/manga_translate_target"
+		app:useSimpleSummaryProvider="true" />
+
+	<ListPreference
+		android:defaultValue="mlkit"
+		android:dependency="manga_translate"
+		android:entries="@array/translate_engine_names"
+		android:entryValues="@array/translate_engine_values"
+		android:key="manga_translate_engine"
+		android:title="@string/manga_translate_engine"
+		app:useSimpleSummaryProvider="true" />
+
+	<EditTextPreference
+		android:dependency="manga_translate"
+		android:key="manga_translate_gemini_key"
+		android:summary="@string/manga_translate_gemini_key_summary"
+		android:title="@string/manga_translate_gemini_key" />
+
+	<EditTextPreference
+		android:defaultValue="gemini-flash-latest"
+		android:dependency="manga_translate"
+		android:key="manga_translate_gemini_model"
+		android:title="@string/manga_translate_gemini_model"
 		app:useSimpleSummaryProvider="true" />
 
 	<MultiSelectListPreference
