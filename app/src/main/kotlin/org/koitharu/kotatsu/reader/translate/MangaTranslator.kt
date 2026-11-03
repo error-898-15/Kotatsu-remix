@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.net.Uri
+import android.util.Base64
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -29,15 +30,19 @@ import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions
 import com.google.mlkit.vision.text.korean.KoreanTextRecognizerOptions
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import org.json.JSONTokener
 import org.koitharu.kotatsu.core.util.ext.isZipUri
 import org.koitharu.kotatsu.parsers.util.runCatchingCancellable
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -59,7 +64,7 @@ data class TranslateConfig(
 	val geminiModel: String,
 ) {
 	val useGemini: Boolean get() = engine == "gemini" && geminiKey.isNotBlank()
-	val cacheKey: String get() = "v2_${source}_${target}_${if (useGemini) "g" else "m"}"
+	val cacheKey: String get() = "v3_${source}_${target}_${if (useGemini) "g" else "m"}"
 }
 
 /**
@@ -83,7 +88,7 @@ class MangaTranslator @Inject constructor(
 	private val translators = HashMap<String, Translator>()
 	private val langId by lazy {
 		LanguageIdentification.getClient(
-			LanguageIdentificationOptions.Builder().setConfidenceThreshold(0.6f).build(),
+			LanguageIdentificationOptions.Builder().setConfidenceThreshold(0.75f).build(),
 		)
 	}
 
@@ -104,16 +109,19 @@ class MangaTranslator @Inject constructor(
 					none.createNewFile() // no text on this page, do not scan it again
 					return@withLock uri
 				}
-				val translated = translateBubbles(bubbles, cfg)
-				if (translated.isEmpty()) return@withLock uri
-				withContext(Dispatchers.Default) { render(bitmap, translated) }
+				val outcome = translateBubbles(bubbles, cfg, bitmap)
+				if (outcome.items.isEmpty()) return@withLock uri
+				withContext(Dispatchers.Default) { render(bitmap, outcome.items) }
+				// if something failed to translate the result is NOT cached, so the next open retries
+				val dst = if (outcome.complete) out else File(cacheDir, "${name}_partial.jpg")
 				withContext(Dispatchers.IO) {
 					val tmp = File(cacheDir, name + ".tmp")
 					tmp.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
-					tmp.renameTo(out)
+					dst.delete()
+					tmp.renameTo(dst)
 					trimCache()
 				}
-				Uri.fromFile(out)
+				Uri.fromFile(dst)
 			} finally {
 				bitmap.recycle()
 			}
@@ -122,7 +130,7 @@ class MangaTranslator @Inject constructor(
 
 	// ---------------------------------------------------------------- OCR
 
-	private class TextLine(val rect: Rect, val text: String)
+	private class TextLine(val rect: Rect, val text: String, val block: Int)
 
 	private fun recognizer(key: String): TextRecognizer = recognizers.getOrPut(key) {
 		TextRecognition.getClient(
@@ -143,9 +151,14 @@ class MangaTranslator @Inject constructor(
 		val latin = recognizeWith("latin", bitmap)
 		if (latin.size >= 3) return latin
 		var best = latin
+		var bestLen = latin.sumOf { it.text.length } * 1.5 // Latin wins unless another script reads clearly more
 		for (key in listOf("ja", "ko", "zh", "hi")) {
 			val r = recognizeWith(key, bitmap)
-			if (r.sumOf { it.text.length } > best.sumOf { it.text.length }) best = r
+			val len = r.sumOf { it.text.length }
+			if (len > bestLen) {
+				best = r
+				bestLen = len.toDouble()
+			}
 		}
 		return best
 	}
@@ -158,26 +171,41 @@ class MangaTranslator @Inject constructor(
 		val w = bitmap.width
 		val h = bitmap.height
 		val result = ArrayList<TextLine>()
+		// small pages: upscale for OCR, ML Kit reads small text much better this way
+		val scale = if (w < 1000) 1.5f else 1f
+		var blockId = 0
 		var y = 0
 		while (y < h) {
 			val end = min(h, y + tileH)
 			val whole = y == 0 && end == h
-			val tile = if (whole) bitmap else Bitmap.createBitmap(bitmap, 0, y, w, end - y)
+			val crop = if (whole) bitmap else Bitmap.createBitmap(bitmap, 0, y, w, end - y)
+			val tile = if (scale > 1f) {
+				Bitmap.createScaledBitmap(crop, (crop.width * scale).toInt(), (crop.height * scale).toInt(), true)
+			} else {
+				crop
+			}
 			try {
 				val text = rec.process(InputImage.fromBitmap(tile, 0)).await()
 				val ownTop = if (y == 0) 0 else y + overlap / 2
 				val ownBottom = if (end == h) h else end - overlap / 2
 				for (block in text.textBlocks) {
+					blockId++
 					for (line in block.lines) {
 						val box = line.boundingBox ?: continue
 						val s = line.text.trim()
 						if (s.isEmpty()) continue
-						val rect = Rect(box.left, box.top + y, box.right, box.bottom + y)
-						if (rect.centerY() in ownTop until ownBottom) result.add(TextLine(rect, s))
+						val rect = Rect(
+							(box.left / scale).toInt(),
+							(box.top / scale).toInt() + y,
+							(box.right / scale).toInt(),
+							(box.bottom / scale).toInt() + y,
+						)
+						if (rect.centerY() in ownTop until ownBottom) result.add(TextLine(rect, s, blockId))
 					}
 				}
 			} finally {
-				if (!whole) tile.recycle()
+				if (tile !== crop) tile.recycle()
+				if (crop !== bitmap) crop.recycle()
 			}
 			if (end == h) break
 			y = end - overlap
@@ -217,7 +245,9 @@ class MangaTranslator @Inject constructor(
 		}
 		for (i in 0 until n) {
 			for (j in i + 1 until n) {
-				if (shouldMerge(lines[i].rect, lines[j].rect)) parent[find(i)] = find(j)
+				if (lines[i].block == lines[j].block || shouldMerge(lines[i].rect, lines[j].rect)) {
+					parent[find(i)] = find(j)
+				}
 			}
 		}
 		return lines.indices.groupBy { find(it) }.values.map { ids -> Bubble(ids.map { lines[it] }) }
@@ -230,41 +260,70 @@ class MangaTranslator @Inject constructor(
 		val ta = min(a.width(), a.height()).toFloat()
 		val tb = min(b.width(), b.height()).toFloat()
 		val tmax = max(ta, tb)
-		if (tmax > min(ta, tb) * 1.8f) return false
+		if (tmax > min(ta, tb) * 2.0f) return false
 		val dx = max(0, max(a.left, b.left) - min(a.right, b.right))
 		val dy = max(0, max(a.top, b.top) - min(a.bottom, b.bottom))
-		return dx <= tmax * 0.9f && dy <= tmax * 0.9f
+		return dx <= tmax * 1.1f && dy <= tmax * 1.1f
 	}
 
 	// ---------------------------------------------------------------- translation
 
 	private class Translated(val bubble: Bubble, val text: String)
 
-	private suspend fun translateBubbles(bubbles: List<Bubble>, cfg: TranslateConfig): List<Translated> {
+	private class Outcome(val items: List<Translated>, val complete: Boolean)
+
+	private suspend fun translateBubbles(bubbles: List<Bubble>, cfg: TranslateConfig, page: Bitmap): Outcome {
 		val items = bubbles.map { it to it.text() }.filter { (_, t) -> t.count { c -> c.isLetter() } >= 2 }
-		if (items.isEmpty()) return emptyList()
-		val sources = items.map { (_, t) -> detectSource(t, cfg) }
+		if (items.isEmpty()) return Outcome(emptyList(), true)
+		val pageLatin = pageLatinLanguage(items.map { it.second }, cfg)
+		val sources = items.map { (_, t) -> detectSource(t, cfg, pageLatin) }
 		// skip text that is already in the target language
 		val keep = items.indices.filter { sources[it] != cfg.target }
-		if (keep.isEmpty()) return emptyList()
+		if (keep.isEmpty()) return Outcome(emptyList(), true)
 
 		if (cfg.useGemini) {
-			val g = runCatchingCancellable { geminiTranslate(keep.map { items[it].second }, cfg) }.getOrNull()
+			val g = runCatchingCancellable { geminiTranslate(keep.map { items[it].second }, cfg, page) }.getOrNull()
 			if (g != null) {
-				return keep.indices.mapNotNull { k ->
-					val t = g[k].trim()
-					if (t.isEmpty()) null else Translated(items[keep[k]].first, t)
+				val out = ArrayList<Translated>()
+				var complete = true
+				keep.forEachIndexed { k, idx ->
+					val t = g[k]
+					when {
+						t == null -> complete = false // model skipped it by mistake
+						t.isBlank() -> Unit // sound effect / watermark: intentionally left as is
+						else -> out.add(Translated(items[idx].first, t.trim()))
+					}
 				}
+				return Outcome(out, complete)
 			}
 		}
-		return keep.mapNotNull { i ->
+		var complete = true
+		val out = keep.mapNotNull { i ->
 			val t = runCatchingCancellable { mlkitTranslate(items[i].second, sources[i], cfg.target) }
 				.getOrNull()?.trim()
-			if (t.isNullOrEmpty()) null else Translated(items[i].first, t)
+			if (t.isNullOrEmpty()) {
+				complete = false
+				null
+			} else {
+				Translated(items[i].first, t)
+			}
 		}
+		return Outcome(out, complete)
 	}
 
-	private suspend fun detectSource(text: String, cfg: TranslateConfig): String {
+	/**
+	 * Language of the Latin-script text on the whole page. Guessing it per bubble is unreliable
+	 * (short ALL CAPS lines get random languages, and then ML Kit leaves them untranslated).
+	 */
+	private suspend fun pageLatinLanguage(texts: List<String>, cfg: TranslateConfig): String {
+		if (cfg.source != "auto") return cfg.source
+		val latin = texts.filter { t -> t.any { scriptOf(it) == "latin" } }.joinToString(". ").lowercase()
+		if (latin.length < 40) return "en"
+		val id = runCatchingCancellable { langId.identifyLanguage(latin).await() }.getOrNull()
+		return if (id != null && id in TranslateLanguage.getAllLanguages()) id else "en"
+	}
+
+	private fun detectSource(text: String, cfg: TranslateConfig, pageLatin: String): String {
 		if (cfg.source != "auto") return cfg.source
 		val counts = HashMap<String, Int>()
 		for (c in text) {
@@ -273,44 +332,124 @@ class MangaTranslator @Inject constructor(
 		}
 		val top = counts.entries.maxByOrNull { it.value }?.key ?: return "en"
 		if (counts["ja"] != null) return "ja" // kana present: Japanese even if kanji dominate
-		if (top != "latin") return top
-		if (text.length < 12) return "en"
-		val id = runCatchingCancellable { langId.identifyLanguage(text).await() }.getOrNull()
-		return if (id != null && id in TranslateLanguage.getAllLanguages()) id else "en"
+		return if (top != "latin") top else pageLatin
 	}
 
+	private val readyPairs = HashSet<String>()
+
 	private suspend fun mlkitTranslate(text: String, from: String, to: String): String {
-		val translator = translators.getOrPut("$from>$to") {
+		val pair = "$from>$to"
+		val translator = translators.getOrPut(pair) {
 			Translation.getClient(
 				TranslatorOptions.Builder().setSourceLanguage(from).setTargetLanguage(to).build(),
 			)
 		}
-		translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await() // first use only
-		return translator.translate(text).await()
+		if (pair !in readyPairs) {
+			translator.downloadModelIfNeeded(DownloadConditions.Builder().build()).await() // first use only
+			readyPairs.add(pair)
+		}
+		val input = normalizeForMt(text)
+		var last: Exception? = null
+		for (attempt in 0 until 3) {
+			try {
+				val result = translator.translate(input).await().trim()
+				if (result.isNotEmpty()) return result
+			} catch (e: CancellationException) {
+				throw e
+			} catch (e: Exception) {
+				last = e
+			}
+			delay(400)
+		}
+		throw last ?: IllegalStateException("ML Kit returned empty text")
 	}
 
-	private suspend fun geminiTranslate(texts: List<String>, cfg: TranslateConfig): List<String> =
+	/**
+	 * ML Kit treats ALL CAPS words as names / acronyms and leaves them untranslated or breaks them.
+	 * Manga is mostly ALL CAPS, so convert it to normal sentence case before translating.
+	 */
+	private fun normalizeForMt(text: String): String {
+		var t = text.replace('|', 'I')
+		val letters = t.filter { it.isLetter() }
+		val allCaps = letters.length >= 3 && letters.all { it.isUpperCase() } && letters.any { scriptOf(it) == "latin" }
+		if (!allCaps) return t
+		val sb = StringBuilder()
+		var cap = true
+		for (c in t.lowercase()) {
+			if (cap && c.isLetter()) {
+				sb.append(c.uppercaseChar())
+				cap = false
+			} else {
+				sb.append(c)
+			}
+			if (c == '.' || c == '!' || c == '?') cap = true
+		}
+		t = sb.toString().replace(Regex("\\bi\\b"), "I")
+		return t
+	}
+
+	private suspend fun geminiTranslate(texts: List<String>, cfg: TranslateConfig, page: Bitmap): Map<Int, String> {
+		val image = withContext(Dispatchers.Default) { pageJpegBase64(page) }
+		var last: Exception? = null
+		for (attempt in 0 until 2) {
+			try {
+				return requestGemini(texts, cfg, image)
+			} catch (e: CancellationException) {
+				throw e
+			} catch (e: Exception) {
+				last = e
+				if (attempt == 0) delay(1500)
+			}
+		}
+		throw last ?: IllegalStateException("Gemini failed")
+	}
+
+	/** The page is sent as an image too, so the model sees who speaks and can fix OCR mistakes. */
+	private fun pageJpegBase64(page: Bitmap): String? {
+		if (page.height > page.width * 3) return null // webtoon strip: text only
+		val scale = min(1f, 1600f / max(page.width, page.height))
+		val img = if (scale < 1f) {
+			Bitmap.createScaledBitmap(page, (page.width * scale).toInt(), (page.height * scale).toInt(), true)
+		} else {
+			page
+		}
+		val bytes = ByteArrayOutputStream().also { img.compress(Bitmap.CompressFormat.JPEG, 80, it) }.toByteArray()
+		if (img !== page) img.recycle()
+		return Base64.encodeToString(bytes, Base64.NO_WRAP)
+	}
+
+	private suspend fun requestGemini(texts: List<String>, cfg: TranslateConfig, imageB64: String?): Map<Int, String> =
 		withContext(Dispatchers.IO) {
 			val target = Locale(cfg.target).getDisplayLanguage(Locale.ENGLISH)
 			val src = if (cfg.source == "auto") "its original language" else Locale(cfg.source).getDisplayLanguage(Locale.ENGLISH)
-			val prompt = "You are a professional manga and webtoon translator. " +
-				"Translate every item of the JSON array below from $src into $target. " +
-				"Rules: natural spoken dialogue, short enough to fit a speech bubble, sound effects stay short, " +
-				"keep character names consistent, no explanations. " +
-				"Return ONLY a JSON array of strings with exactly ${texts.size} items in the same order.\n\n" +
-				JSONArray(texts).toString()
+			val numbered = JSONArray()
+			texts.forEachIndexed { i, t -> numbered.put(JSONObject().put("id", i).put("text", t)) }
+			val prompt = "You are a professional manga / webtoon scanlation translator and typesetter.\n" +
+				"${if (imageB64 != null) "The attached image is the page. " else ""}" +
+				"Below is a JSON array of text snippets found on it by OCR. Each snippet is typeset on its own place on the page. " +
+				"OCR may contain mistakes, wrong letters or split words: fix them using the image and the context.\n" +
+				"Translate every snippet from $src into $target.\n" +
+				"Rules:\n" +
+				"- Natural spoken language that matches the speaker's tone, as a human translator would write it.\n" +
+				"- Short enough to fit in a speech bubble. No explanations, no notes.\n" +
+				"- Keep character names consistent and transliterate them naturally.\n" +
+				"- Snippets that are only sound effects, watermarks, site names, logos, credits, page numbers or random noise: return an empty string.\n" +
+				"Return ONLY a JSON array of objects {\"id\": <same id>, \"text\": <translation>} for ALL ${texts.size} snippets.\n\n" +
+				numbered.toString()
+			val parts = JSONArray()
+			if (imageB64 != null) {
+				parts.put(JSONObject().put("inline_data", JSONObject().put("mime_type", "image/jpeg").put("data", imageB64)))
+			}
+			parts.put(JSONObject().put("text", prompt))
 			val body = JSONObject()
-				.put(
-					"contents",
-					JSONArray().put(JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))),
-				)
+				.put("contents", JSONArray().put(JSONObject().put("parts", parts)))
 				.put("generationConfig", JSONObject().put("responseMimeType", "application/json").put("temperature", 0.3))
 			val conn = URL("https://generativelanguage.googleapis.com/v1beta/models/${cfg.geminiModel}:generateContent")
 				.openConnection() as HttpURLConnection
 			try {
 				conn.requestMethod = "POST"
 				conn.connectTimeout = 15_000
-				conn.readTimeout = 60_000
+				conn.readTimeout = 90_000
 				conn.doOutput = true
 				conn.setRequestProperty("Content-Type", "application/json")
 				conn.setRequestProperty("x-goog-api-key", cfg.geminiKey)
@@ -319,9 +458,24 @@ class MangaTranslator @Inject constructor(
 				val resp = conn.inputStream.bufferedReader().use { it.readText() }
 				val answer = JSONObject(resp).getJSONArray("candidates").getJSONObject(0)
 					.getJSONObject("content").getJSONArray("parts").getJSONObject(0).getString("text")
-				val arr = JSONArray(answer)
-				check(arr.length() == texts.size) { "Gemini returned ${arr.length()} items" }
-				List(texts.size) { arr.getString(it) }
+				val root = JSONTokener(answer).nextValue()
+				val arr = when (root) {
+					is JSONArray -> root
+					is JSONObject -> root.optJSONArray("translations") ?: root.optJSONArray("items")
+						?: error("Unexpected Gemini answer")
+					else -> error("Unexpected Gemini answer")
+				}
+				val map = HashMap<Int, String>()
+				for (i in 0 until arr.length()) {
+					val o = arr.get(i)
+					if (o is JSONObject) {
+						map[o.getInt("id")] = o.optString("text", "")
+					} else if (arr.length() == texts.size) {
+						map[i] = arr.getString(i)
+					}
+				}
+				check(map.isNotEmpty()) { "Gemini returned nothing" }
+				map
 			} finally {
 				conn.disconnect()
 			}
@@ -335,20 +489,11 @@ class MangaTranslator @Inject constructor(
 
 	private fun render(bitmap: Bitmap, items: List<Translated>) {
 		val canvas = Canvas(bitmap)
-		val fill = Paint().apply { style = Paint.Style.FILL }
 
-		// pass 1: erase the original text using the real background colour
-		val rings = items.map { item ->
-			val b = item.bubble
-			val ring = ringInfo(bitmap, b.rect, max(4, (b.thickness * 0.35f).toInt()))
-			val e = max(2, (b.thickness * 0.22f).toInt())
-			for (line in b.lines) {
-				val r = Rect(line.rect).apply { inset(-e, -e) }
-				fill.color = if (ring.uniform) ring.color else ringInfo(bitmap, line.rect, 4).color
-				canvas.drawRect(r, fill)
-			}
-			ring
-		}
+		// pass 1: erase the original text pixels and rebuild the background underneath (inpainting),
+		// so no rectangles stay visible, neither on white bubbles nor on artwork
+		val rings = items.map { ringInfo(bitmap, it.bubble.rect, max(4, (it.bubble.thickness * 0.35f).toInt())) }
+		items.forEachIndexed { i, item -> eraseText(bitmap, item.bubble, rings[i]) }
 
 		// pass 2: typeset the translation so it fills the bubble
 		val typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -361,8 +506,9 @@ class MangaTranslator @Inject constructor(
 				val grow = (max(b.rect.width(), b.rect.height()) * 0.6f).toInt() + 8
 				area = growWhileUniform(bitmap, b.rect, ring.color, grow)
 			} else {
-				val p = (b.thickness * 0.3f).toInt()
-				area = Rect(b.rect).apply { inset(-p, -p) }
+				val px = (b.thickness * 0.5f).toInt()
+				val py = (b.thickness * 0.2f).toInt()
+				area = Rect(b.rect).apply { inset(-px, -py) }
 			}
 			if (area.width() < area.height() * 0.6f) { // narrow (vertical) text: use a wider box
 				val w = (area.height() * 0.6f).toInt()
@@ -393,7 +539,7 @@ class MangaTranslator @Inject constructor(
 			if (!ring.uniform) { // artwork behind the text: add an outline so it stays readable
 				val outline = TextPaint(paint).apply {
 					style = Paint.Style.STROKE
-					strokeWidth = lo * 0.2f
+					strokeWidth = lo * 0.14f
 					strokeJoin = Paint.Join.ROUND
 					color = if (dark) Color.BLACK else Color.WHITE
 				}
@@ -403,6 +549,127 @@ class MangaTranslator @Inject constructor(
 			canvas.restore()
 		}
 	}
+
+	/** Removes only the glyph pixels (plus a small halo) and fills them from the surrounding background. */
+	private fun eraseText(bmp: Bitmap, b: Bubble, ring: Ring) {
+		val pad = max(3, (b.thickness * 0.22f).toInt())
+		val roi = Rect(b.rect).apply { inset(-pad, -pad) }
+		if (!roi.intersect(0, 0, bmp.width, bmp.height)) return
+		val w = roi.width()
+		val h = roi.height()
+		if (w < 2 || h < 2) return
+		val px = IntArray(w * h)
+		bmp.getPixels(px, 0, w, roi.left, roi.top, w, h)
+		val mask = BooleanArray(w * h)
+		for (line in b.lines) {
+			val lr = Rect(line.rect).apply { inset(-pad, -pad) }
+			if (!lr.intersect(roi)) continue
+			val bg = if (ring.uniform) ring.color else ringInfo(bmp, line.rect, pad + 2).color
+			for (y in lr.top until lr.bottom) {
+				val row = (y - roi.top) * w - roi.left
+				for (x in lr.left until lr.right) {
+					if (dist(px[row + x], bg) > 100) mask[row + x] = true
+				}
+			}
+		}
+		dilate(mask, w, h, max(1, (b.thickness * 0.12f).toInt()))
+		inpaint(px, mask, w, h, ring.color)
+		bmp.setPixels(px, 0, w, roi.left, roi.top, w, h)
+	}
+
+	private fun dilate(mask: BooleanArray, w: Int, h: Int, r: Int) {
+		val tmp = BooleanArray(mask.size)
+		for (y in 0 until h) {
+			for (x in 0 until w) {
+				if (!mask[y * w + x]) continue
+				for (dx in -r..r) {
+					val nx = x + dx
+					if (nx in 0 until w) tmp[y * w + nx] = true
+				}
+			}
+		}
+		val out = BooleanArray(mask.size)
+		for (y in 0 until h) {
+			for (x in 0 until w) {
+				if (!tmp[y * w + x]) continue
+				for (dy in -r..r) {
+					val ny = y + dy
+					if (ny in 0 until h) out[ny * w + x] = true
+				}
+			}
+		}
+		out.copyInto(mask)
+	}
+
+	/** Fills masked pixels: average of horizontal and vertical interpolation, then a few smoothing passes. */
+	private fun inpaint(px: IntArray, mask: BooleanArray, w: Int, h: Int, fallback: Int) {
+		val hv = IntArray(px.size)
+		val hOk = BooleanArray(px.size)
+		val vv = IntArray(px.size)
+		val vOk = BooleanArray(px.size)
+		for (y in 0 until h) interpolateLine(px, mask, y * w, 1, w, hv, hOk)
+		for (x in 0 until w) interpolateLine(px, mask, x, w, h, vv, vOk)
+		for (i in px.indices) {
+			if (!mask[i]) continue
+			px[i] = when {
+				hOk[i] && vOk[i] -> mix(hv[i], vv[i], 0.5f)
+				hOk[i] -> hv[i]
+				vOk[i] -> vv[i]
+				else -> fallback
+			}
+		}
+		repeat(6) {
+			for (y in 0 until h) {
+				for (x in 0 until w) {
+					val i = y * w + x
+					if (!mask[i]) continue
+					var r = 0
+					var g = 0
+					var b = 0
+					var n = 0
+					if (x > 0) { val c = px[i - 1]; r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++ }
+					if (x < w - 1) { val c = px[i + 1]; r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++ }
+					if (y > 0) { val c = px[i - w]; r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++ }
+					if (y < h - 1) { val c = px[i + w]; r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++ }
+					if (n > 0) px[i] = Color.rgb(r / n, g / n, b / n)
+				}
+			}
+		}
+	}
+
+	private fun interpolateLine(
+		px: IntArray, mask: BooleanArray, start: Int, stride: Int, len: Int, out: IntArray, ok: BooleanArray,
+	) {
+		var i = 0
+		while (i < len) {
+			if (!mask[start + i * stride]) {
+				i++
+				continue
+			}
+			var j = i
+			while (j < len && mask[start + j * stride]) j++
+			val li = i - 1
+			val ri = j
+			for (k in i until j) {
+				val idx = start + k * stride
+				when {
+					li >= 0 && ri < len -> {
+						out[idx] = mix(px[start + li * stride], px[start + ri * stride], (k - li).toFloat() / (ri - li))
+						ok[idx] = true
+					}
+					li >= 0 -> { out[idx] = px[start + li * stride]; ok[idx] = true }
+					ri < len -> { out[idx] = px[start + ri * stride]; ok[idx] = true }
+				}
+			}
+			i = j
+		}
+	}
+
+	private fun mix(a: Int, b: Int, t: Float): Int = Color.rgb(
+		(Color.red(a) + (Color.red(b) - Color.red(a)) * t).toInt(),
+		(Color.green(a) + (Color.green(b) - Color.green(a)) * t).toInt(),
+		(Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t).toInt(),
+	)
 
 	private fun layoutOf(text: String, paint: TextPaint, width: Int): StaticLayout =
 		StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
@@ -437,8 +704,8 @@ class MangaTranslator @Inject constructor(
 		var mean = meanOf(samples)
 		val inliers = samples.filter { dist(it, mean) <= 90 }
 		if (inliers.isNotEmpty()) mean = meanOf(inliers)
-		val flat = samples.count { dist(it, mean) <= 40 }
-		return Ring(mean, flat >= samples.size * 0.85f)
+		val flat = samples.count { dist(it, mean) <= 55 }
+		return Ring(mean, flat >= samples.size * 0.8f)
 	}
 
 	private fun meanOf(list: List<Int>): Int {
@@ -501,7 +768,7 @@ class MangaTranslator @Inject constructor(
 		val h = (y1.coerceIn(top + 1, bmp.height) - top)
 		val px = IntArray(w * h)
 		bmp.getPixels(px, 0, w, left, top, w, h)
-		return px.count { dist(it, bg) <= 45 } >= px.size * 0.96f
+		return px.count { dist(it, bg) <= 60 } >= px.size * 0.94f
 	}
 
 	// ---------------------------------------------------------------- helpers
