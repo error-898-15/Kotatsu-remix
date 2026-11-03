@@ -138,6 +138,8 @@ dependencies {
 	implementation libs.mlkit.ocr.japanese
 	implementation libs.mlkit.ocr.chinese
 	implementation libs.mlkit.ocr.korean
+	implementation libs.mlkit.ocr.devanagari
+	implementation libs.mlkit.langid
 	implementation libs.mlkit.translate
 
 	implementation libs.androidx.appcompat
