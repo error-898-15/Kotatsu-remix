@@ -72,6 +72,7 @@ import org.koitharu.kotatsu.parsers.model.MangaSource
 import org.koitharu.kotatsu.parsers.util.requireBody
 import org.koitharu.kotatsu.parsers.util.runCatchingCancellable
 import org.koitharu.kotatsu.reader.translate.MangaTranslator
+import org.koitharu.kotatsu.reader.translate.TranslateConfig
 import org.koitharu.kotatsu.reader.ui.pager.ReaderPage
 import java.io.File
 import java.util.LinkedList
@@ -220,7 +221,16 @@ class PageLoader @Inject constructor(
 	suspend fun translateIfEnabled(uri: Uri): Uri {
 		if (!settings.isMangaTranslateEnabled) return uri
 		return runCatchingCancellable {
-			mangaTranslator.translate(uri, settings.translateSourceLang, settings.translateTargetLang)
+			mangaTranslator.translate(
+				uri,
+				TranslateConfig(
+					source = settings.translateSourceLang,
+					target = settings.translateTargetLang,
+					engine = settings.translateEngine,
+					geminiKey = settings.geminiApiKey,
+					geminiModel = settings.geminiModel,
+				),
+			)
 		}.onFailure { error ->
 			error.printStackTraceDebug()
 		}.getOrDefault(uri)
