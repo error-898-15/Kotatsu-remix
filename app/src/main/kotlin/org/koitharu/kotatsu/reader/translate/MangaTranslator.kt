@@ -47,6 +47,7 @@ import java.io.File
 import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.zip.ZipFile
@@ -59,12 +60,15 @@ import kotlin.math.min
 data class TranslateConfig(
 	val source: String, // "auto" or language code
 	val target: String,
-	val engine: String, // "mlkit" or "gemini"
+	val engine: String, // "mlkit", "google" or "gemini"
 	val geminiKey: String,
 	val geminiModel: String,
 ) {
 	val useGemini: Boolean get() = engine == "gemini" && geminiKey.isNotBlank()
-	val cacheKey: String get() = "v3_${source}_${target}_${if (useGemini) "g" else "m"}"
+	/** Google Translate is used as the main engine, or as the quality fallback when Gemini fails. */
+	val useGoogle: Boolean get() = engine == "google" || engine == "gemini"
+	val cacheKey: String
+		get() = "v4_${source}_${target}_${if (useGemini) "g" else if (useGoogle) "o" else "m"}"
 }
 
 /**
@@ -298,9 +302,17 @@ class MangaTranslator @Inject constructor(
 			}
 		}
 		var complete = true
+		var googleFailures = 0
 		val out = keep.mapNotNull { i ->
-			val t = runCatchingCancellable { mlkitTranslate(items[i].second, sources[i], cfg.target) }
-				.getOrNull()?.trim()
+			var t: String? = null
+			if (cfg.useGoogle && googleFailures < 2) {
+				t = runCatchingCancellable { googleTranslate(items[i].second, cfg) }.getOrNull()?.trim()
+				if (t.isNullOrEmpty()) googleFailures++
+			}
+			if (t.isNullOrEmpty()) { // offline engine as the last resort
+				t = runCatchingCancellable { mlkitTranslate(items[i].second, sources[i], cfg.target) }
+					.getOrNull()?.trim()
+			}
 			if (t.isNullOrEmpty()) {
 				complete = false
 				null
@@ -388,6 +400,33 @@ class MangaTranslator @Inject constructor(
 		return t
 	}
 
+	/** Google Translate web endpoint (no key needed). Much better than the offline ML Kit model. */
+	private suspend fun googleTranslate(text: String, cfg: TranslateConfig): String = withContext(Dispatchers.IO) {
+		fun code(c: String) = if (c == "zh") "zh-CN" else c
+		val q = URLEncoder.encode(normalizeForMt(text), "UTF-8")
+		val sl = if (cfg.source == "auto") "auto" else code(cfg.source)
+		val url = URL(
+			"https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sl&tl=${code(cfg.target)}&dt=t&q=$q",
+		)
+		val conn = url.openConnection() as HttpURLConnection
+		try {
+			conn.connectTimeout = 10_000
+			conn.readTimeout = 20_000
+			conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36")
+			check(conn.responseCode in 200..299) { "Google HTTP ${conn.responseCode}" }
+			val resp = conn.inputStream.bufferedReader().use { it.readText() }
+			val segs = JSONArray(resp).getJSONArray(0)
+			val sb = StringBuilder()
+			for (i in 0 until segs.length()) {
+				val seg = segs.optJSONArray(i) ?: continue
+				sb.append(seg.optString(0, ""))
+			}
+			sb.toString().trim()
+		} finally {
+			conn.disconnect()
+		}
+	}
+
 	private suspend fun geminiTranslate(texts: List<String>, cfg: TranslateConfig, page: Bitmap): Map<Int, String> {
 		val image = withContext(Dispatchers.Default) { pageJpegBase64(page) }
 		var last: Exception? = null
@@ -422,6 +461,13 @@ class MangaTranslator @Inject constructor(
 		withContext(Dispatchers.IO) {
 			val target = Locale(cfg.target).getDisplayLanguage(Locale.ENGLISH)
 			val src = if (cfg.source == "auto") "its original language" else Locale(cfg.source).getDisplayLanguage(Locale.ENGLISH)
+			val style = when (cfg.target) {
+				"hi" -> "Write natural everyday conversational Hindi in Devanagari, the way people really speak. " +
+					"Never translate word for word, avoid stiff bookish or Sanskritised words, and make every sentence meaningful.\n"
+				"bn" -> "Write natural everyday conversational Bengali in Bengali script, the way people really speak. " +
+					"Never translate word for word and make every sentence meaningful.\n"
+				else -> "Write natural fluent $target, never word for word.\n"
+			}
 			val numbered = JSONArray()
 			texts.forEachIndexed { i, t -> numbered.put(JSONObject().put("id", i).put("text", t)) }
 			val prompt = "You are a professional manga / webtoon scanlation translator and typesetter.\n" +
@@ -429,6 +475,7 @@ class MangaTranslator @Inject constructor(
 				"Below is a JSON array of text snippets found on it by OCR. Each snippet is typeset on its own place on the page. " +
 				"OCR may contain mistakes, wrong letters or split words: fix them using the image and the context.\n" +
 				"Translate every snippet from $src into $target.\n" +
+				style +
 				"Rules:\n" +
 				"- Natural spoken language that matches the speaker's tone, as a human translator would write it.\n" +
 				"- Short enough to fit in a speech bubble. No explanations, no notes.\n" +
