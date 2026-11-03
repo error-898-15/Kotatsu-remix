@@ -173,10 +173,20 @@ class AppSettings @Inject constructor(@ApplicationContext context: Context) {
 		get() = prefs.getBoolean(KEY_TRANSLATE_ENABLED, false)
 
 	val translateSourceLang: String
-		get() = prefs.getString(KEY_TRANSLATE_SOURCE, "ja") ?: "ja"
+		get() = prefs.getString(KEY_TRANSLATE_SOURCE, "auto") ?: "auto"
 
 	val translateTargetLang: String
 		get() = prefs.getString(KEY_TRANSLATE_TARGET, "en") ?: "en"
+
+	val translateEngine: String
+		get() = prefs.getString(KEY_TRANSLATE_ENGINE, "mlkit") ?: "mlkit"
+
+	val geminiApiKey: String
+		get() = prefs.getString(KEY_TRANSLATE_GEMINI_KEY, "").orEmpty().trim()
+
+	val geminiModel: String
+		get() = prefs.getString(KEY_TRANSLATE_GEMINI_MODEL, "gemini-flash-latest")
+			?.trim()?.takeIf { it.isNotEmpty() } ?: "gemini-flash-latest"
 
 	val readerControls: Set<ReaderControl>
 		get() = prefs.getStringSet(KEY_READER_CONTROLS, null)?.mapNotNullTo(EnumSet.noneOf(ReaderControl::class.java)) {
@@ -773,6 +783,9 @@ class AppSettings @Inject constructor(@ApplicationContext context: Context) {
 		const val KEY_TRANSLATE_ENABLED = "manga_translate"
 		const val KEY_TRANSLATE_SOURCE = "manga_translate_source"
 		const val KEY_TRANSLATE_TARGET = "manga_translate_target"
+		const val KEY_TRANSLATE_ENGINE = "manga_translate_engine"
+		const val KEY_TRANSLATE_GEMINI_KEY = "manga_translate_gemini_key"
+		const val KEY_TRANSLATE_GEMINI_MODEL = "manga_translate_gemini_model"
 		const val KEY_LOCAL_LIST_ORDER = "local_order"
 		const val KEY_HISTORY_ORDER = "history_order"
 		const val KEY_FAVORITES_ORDER = "fav_order"
