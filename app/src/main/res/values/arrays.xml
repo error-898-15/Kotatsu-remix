@@ -145,16 +145,28 @@
 		<item>@string/disable</item>
 	</string-array>
 	<string-array name="translate_source_names" translatable="false">
+		<item>Auto detect</item>
 		<item>Japanese</item>
 		<item>Chinese</item>
 		<item>Korean</item>
+		<item>Hindi</item>
 		<item>English</item>
 	</string-array>
 	<string-array name="translate_source_values" translatable="false">
+		<item>auto</item>
 		<item>ja</item>
 		<item>zh</item>
 		<item>ko</item>
+		<item>hi</item>
 		<item>en</item>
+	</string-array>
+	<string-array name="translate_engine_names" translatable="false">
+		<item>ML Kit (offline, basic quality)</item>
+		<item>Gemini (best quality, API key)</item>
+	</string-array>
+	<string-array name="translate_engine_values" translatable="false">
+		<item>mlkit</item>
+		<item>gemini</item>
 	</string-array>
 	<string-array name="translate_target_names" translatable="false">
 		<item>English</item>
